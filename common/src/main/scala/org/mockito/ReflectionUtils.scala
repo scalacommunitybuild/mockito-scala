@@ -1,6 +1,6 @@
 package org.mockito
 
-import java.lang.reflect.{ Field, Method, Modifier }
+import java.lang.reflect.{ Field, Method }
 
 import org.mockito.internal.ValueClassWrapper
 import org.mockito.invocation.InvocationOnMock
@@ -9,7 +9,6 @@ import ru.vyarus.java.generics.resolver.GenericsResolver
 
 import scala.reflect.ClassTag
 import scala.reflect.internal.Symbols
-import scala.util.{ Failure, Success, Try => uTry }
 import scala.util.control.NonFatal
 
 object ReflectionUtils {
@@ -123,31 +122,18 @@ object ReflectionUtils {
         .getOrElse(Seq.empty)
     }
 
+  // Field.modifiers can no longer be changed on JDK 12+, and JDK 18+ refuses
+  // reflective writes to static finals regardless, so write through Unsafe.
   def setFinalStatic(field: Field, newValue: Any): Unit = {
-    val clazz = classOf[java.lang.Class[_]]
-    field.setAccessible(true)
-    val modifiersField: Field = uTry(clazz.getDeclaredField("modifiers")) match {
-      case Success(modifiers) => modifiers
-      case Failure(e) =>
-        uTry {
-          val getDeclaredFields0           = clazz.getDeclaredMethod("getDeclaredFields0", classOf[Boolean])
-          val accessibleBeforeSet: Boolean = getDeclaredFields0.isAccessible
-          getDeclaredFields0.setAccessible(true)
-          val declaredFields: Array[Field] = getDeclaredFields0
-            .invoke(classOf[Field], java.lang.Boolean.FALSE)
-            .asInstanceOf[Array[Field]]
-          getDeclaredFields0.setAccessible(accessibleBeforeSet)
-          declaredFields.find("modifiers" == _.getName).get
-        } match {
-          case Success(modifiers) => modifiers
-          case Failure(ex) =>
-            e.addSuppressed(ex)
-            throw e
-        }
-    }
-    modifiersField.setAccessible(true)
-    modifiersField.setInt(field, field.getModifiers & ~Modifier.FINAL)
-    field.set(null, newValue)
+    val unsafeClass = Class.forName("sun.misc.Unsafe")
+    val unsafeField = unsafeClass.getDeclaredField("theUnsafe")
+    unsafeField.setAccessible(true)
+    val unsafe = unsafeField.get(null)
+    val base   = unsafeClass.getMethod("staticFieldBase", classOf[Field]).invoke(unsafe, field)
+    val offset = unsafeClass.getMethod("staticFieldOffset", classOf[Field]).invoke(unsafe, field)
+    unsafeClass
+      .getMethod("putObject", classOf[Object], classOf[Long], classOf[Object])
+      .invoke(unsafe, base, offset, newValue.asInstanceOf[AnyRef])
   }
 
 }
